@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Cat - Breed Identifier</title>
+    <title>Le Rouge Cats - AI Breed Identifier</title>
     <!-- Load Tailwind CSS for modern styling -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Use Inter font -->
@@ -53,7 +53,7 @@
         <!-- Header -->
         <header class="text-center mb-8">
             <h1 class="text-4xl font-extrabold text-gray-800 mb-2">
-                <span class="text-red-700">My Cat</span> 
+                <span class="text-red-700">Le Rouge Cats</span> <span class="text-red-400">AI</span>
             </h1>
             <p class="text-xl text-gray-500">Discover your cat's secrets: breed, personality, and rarity.</p>
         </header>
@@ -93,7 +93,7 @@
                 <!-- Placeholder Message -->
                 <div id="resultsPlaceholder" class="bg-gray-100 p-6 rounded-lg text-center h-full flex flex-col justify-center items-center">
                     <svg class="w-12 h-12 text-gray-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4a2 2 0 100 4m-3.5 0h7a1 1 0 011 1v7a1 1 0 01-1 1h-3.5"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 15l-3-3m0 0l-3 3"></path></svg>
-                    <p class="text-gray-500">Upload an image of your feline friend to start the analysis.</p>
+                    <p class="text-gray-500">Upload an image of your feline friend to start the AI analysis.</p>
                 </div>
 
                 <!-- Result Display -->
@@ -116,11 +116,6 @@
                     <ul id="resultTraits" class="list-disc list-inside space-y-1 text-gray-600">
                         <!-- Traits will be inserted here -->
                     </ul>
-                    
-                    <h3 class="text-xl font-bold text-gray-700 mt-6 mb-2">💡 Fun Name Ideas</h3>
-                    <div id="resultNames" class="flex flex-wrap gap-2">
-                        <!-- Name suggestions will be inserted here as pills -->
-                    </div>
                 </div>
             </div>
 
@@ -130,6 +125,38 @@
 
     <!-- JavaScript for Logic and AI Integration -->
     <script type="module">
+        // Global variables for Firebase API keys (provided by Canvas)
+        const apiKey = "AIzaSyCtqB3vGXfP2HS_Vrwt5u7-rLdKQXn_X7Q"; // API Key will be automatically handled by the environment
+
+        // Helper function for exponential backoff retry logic
+        async function fetchWithRetry(url, options, maxRetries = 5) {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.ok) {
+                        return response;
+                    }
+                    if (response.status === 429) { // Rate limit error
+                        const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                        console.warn(`Rate limit exceeded, retrying in ${Math.round(delay / 1000)}s...`);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        continue;
+                    }
+                    // For other non-rate-limit errors, throw to stop retrying
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                } catch (error) {
+                    if (i === maxRetries - 1) {
+                        console.error("Max retries reached. Failed to fetch API.", error);
+                        throw error;
+                    }
+                    // For network errors or other exceptions, use backoff
+                    const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                    console.warn(`Fetch failed, retrying in ${Math.round(delay / 1000)}s...`, error.message);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+
         const fileInput = document.getElementById('fileInput');
         const dropzone = document.getElementById('dropzone');
         const dropzoneText = document.getElementById('dropzoneText');
@@ -147,7 +174,6 @@
         const resultFact = document.getElementById('resultFact');
         const resultDescription = document.getElementById('resultDescription');
         const resultTraits = document.getElementById('resultTraits');
-        const resultNames = document.getElementById('resultNames');
 
         let base64Image = null;
         let mimeType = null;
@@ -156,11 +182,7 @@
 
         dropzone.addEventListener('click', () => fileInput.click());
 
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length > 0) {
-                processFile(e.target.files[0]);
-            }
-        });
+        fileInput.addEventListener('change', handleFileSelect);
 
         dropzone.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -177,11 +199,13 @@
             dropzone.classList.remove('bg-red-100', 'border-red-500');
             const file = e.dataTransfer.files[0];
             if (file) {
-                processFile(file);
+                fileInput.files = e.dataTransfer.files;
+                handleFileSelect();
             }
         });
 
-        function processFile(file) {
+        function handleFileSelect() {
+            const file = fileInput.files[0];
             if (!file) return;
 
             // Simple validation
@@ -216,7 +240,6 @@
             dropzoneText.classList.remove('hidden');
             imagePreview.src = 'https://placehold.co/400x300/fecaca/dc2626?text=Cat+Photo+Preview';
             analyzeButton.disabled = true;
-            fileInput.value = ''; // Clear the file input
             resultsDisplay.classList.add('hidden');
             resultsPlaceholder.classList.remove('hidden');
         }
@@ -226,7 +249,7 @@
             errorMessage.classList.remove('hidden');
             buttonText.textContent = "2. Analyze My Cat!";
             loadingSpinner.classList.add('hidden');
-            analyzeButton.disabled = true;
+            analyzeButton.disabled = false;
         }
 
         function setProcessing(isProcessing) {
@@ -248,63 +271,73 @@
             resultsPlaceholder.classList.add('hidden');
             resultsDisplay.classList.add('hidden');
 
-            try {
-                const { GoogleGenAI, Type } = await import('https://esm.sh/@google/genai');
-                const ai = new GoogleGenAI({apiKey: process.env.API_KEY});
+            const model = 'gemini-2.5-flash-preview-09-2025';
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-                const systemPrompt = `You are a world-class Feline Breed Expert. Your task is to analyze the provided image of a cat and return your findings in a strict JSON format. 
-                Identify the most likely cat breed. Then, based on the breed characteristics, estimate its personality traits, provide a description, assign a rarity score, and provide one truly amazing and little-known fact about that specific cat breed.
-                The Rarity Score is based on how commonly the breed is found globally, where 1 is a very common breed (like a Domestic Shorthair/Tabby) and 10 is an extremely rare breed (like a Sokoke or LaPerm).
-                Finally, based on the breed and personality, suggest 3-5 creative and fun names for the cat.
-                Do not include any introductory or concluding text in your response, just the JSON object.`;
+            const systemPrompt = `You are a world-class Feline Breed Expert. Your task is to analyze the provided image of a cat and return your findings in a strict JSON format. 
+            Identify the most likely cat breed. Then, based on the breed characteristics, estimate its personality traits, provide a description, assign a rarity score, and provide one truly amazing and little-known fact about that specific cat breed.
+            The Rarity Score is based on how commonly the breed is found globally, where 1 is a very common breed (like a Domestic Shorthair/Tabby) and 10 is an extremely rare breed (like a Sokoke or LaPerm).
+            Do not include any introductory or concluding text in your response, just the JSON object.`;
 
-                const schema = {
-                    type: Type.OBJECT,
-                    properties: {
-                        "breedName": { "type": Type.STRING, "description": "The name of the most likely cat breed identified." },
-                        "rarityScore": { "type": Type.INTEGER, "description": "A rarity score from 1 (common) to 10 (extremely rare)." },
-                        "description": { "type": Type.STRING, "description": "A short, engaging paragraph describing the breed's physical characteristics and history." },
-                        "amazingFact": { "type": Type.STRING, "description": "One truly amazing and little-known fact about this specific cat breed." },
-                        "personalityTraits": {
-                            "type": Type.ARRAY,
-                            "items": { "type": Type.STRING },
-                            "description": "A list of 3-5 key personality and temperament traits."
-                        },
-                         "funNames": {
-                            "type": Type.ARRAY,
-                            "items": { "type": Type.STRING },
-                            "description": "A list of 3-5 fun and creative name suggestions for the cat."
-                        }
-                    },
-                    "required": ["breedName", "rarityScore", "description", "amazingFact", "personalityTraits", "funNames"]
-                };
+            const userQuery = "Identify the breed of this cat and provide a comprehensive analysis.";
 
-                const result = await ai.models.generateContent({
-                    model: 'gemini-2.5-flash',
-                    contents: {
-                        parts: [
-                            { text: "Analyze the cat in this image." },
-                            {
-                                inlineData: {
-                                    mimeType: mimeType,
-                                    data: base64Image
-                                }
+            const payload = {
+                contents: [{
+                    role: "user",
+                    parts: [
+                        { text: userQuery },
+                        {
+                            inlineData: {
+                                mimeType: mimeType,
+                                data: base64Image
                             }
-                        ]
-                    },
-                    config: {
-                        systemInstruction: systemPrompt,
-                        responseMimeType: "application/json",
-                        responseSchema: schema
+                        }
+                    ]
+                }],
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                },
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "OBJECT",
+                        properties: {
+                            "breedName": { "type": "STRING", "description": "The name of the most likely cat breed identified." },
+                            "rarityScore": { "type": "INTEGER", "description": "A rarity score from 1 (common) to 10 (extremely rare)." },
+                            "description": { "type": "STRING", "description": "A short, engaging paragraph describing the breed's physical characteristics and history." },
+                            "amazingFact": { "type": "STRING", "description": "One truly amazing and little-known fact about this specific cat breed." },
+                            "personalityTraits": {
+                                "type": "ARRAY",
+                                "items": { "type": "STRING" },
+                                "description": "A list of 3-5 key personality and temperament traits."
+                            }
+                        },
+                        "required": ["breedName", "rarityScore", "description", "amazingFact", "personalityTraits"]
                     }
+                }
+            };
+
+            try {
+                const response = await fetchWithRetry(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
                 });
-                
-                const analysis = JSON.parse(result.text);
+
+                const result = await response.json();
+
+                if (!result.candidates || result.candidates.length === 0) {
+                    throw new Error("API returned no content. The image might be unclear or the model failed to process it.");
+                }
+
+                const jsonText = result.candidates[0].content.parts[0].text.trim();
+                const analysis = JSON.parse(jsonText);
+
                 renderResults(analysis);
 
             } catch (error) {
                 console.error("Analysis Failed:", error);
-                displayError("The analysis failed. Please ensure the image is a clear, well-lit photo of a cat and try again.");
+                displayError("The AI analysis failed. Please ensure the image is a clear, well-lit photo of a cat and try again.");
                 resultsPlaceholder.classList.remove('hidden');
                 resultsDisplay.classList.add('hidden');
             } finally {
@@ -337,17 +370,6 @@
                     li.classList.add('font-medium', 'text-gray-700', 'pl-1');
                     li.textContent = trait;
                     resultTraits.appendChild(li);
-                });
-            }
-
-            // Render Fun Name Ideas
-            resultNames.innerHTML = '';
-            if (Array.isArray(analysis.funNames)) {
-                analysis.funNames.forEach(name => {
-                    const nameTag = document.createElement('span');
-                    nameTag.className = 'bg-red-100 text-red-700 text-sm font-semibold px-3 py-1 rounded-full cursor-default';
-                    nameTag.textContent = name;
-                    resultNames.appendChild(nameTag);
                 });
             }
 
